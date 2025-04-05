@@ -11,10 +11,12 @@ import threading
 # Mediapipe Pose/Holistic setup
 mp_holistic = mp.solutions.holistic
 mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils  # Add drawing utilities
 
 # Global variables for camera access
 camera_active = False
 global_frame = None
+global_frame_with_landmarks = None  # New variable for frame with landmarks
 webcam_thread = None
 camera_lock = threading.Lock()
 
@@ -55,7 +57,7 @@ def camera_thread_function():
     Function that continuously captures frames from the webcam
     and updates the global_frame variable.
     """
-    global global_frame, camera_active
+    global global_frame, global_frame_with_landmarks, camera_active
     
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -67,14 +69,37 @@ def camera_thread_function():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
-    while camera_active:
-        ret, frame = cap.read()
-        if ret:
-            with camera_lock:
-                global_frame = frame.copy()
-        else:
-            print("Warning: Could not read frame from webcam.")
-            time.sleep(0.1)  # Small delay to prevent CPU overload
+    # Initialize holistic detector outside the loop for better performance
+    with mp_holistic.Holistic(min_detection_confidence=0.5,
+                             min_tracking_confidence=0.5) as holistic:
+        while camera_active:
+            ret, frame = cap.read()
+            if ret:
+                # Save the original frame
+                with camera_lock:
+                    global_frame = frame.copy()
+                
+                # Process the frame with MediaPipe Holistic
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = holistic.process(rgb_frame)
+                
+                # Draw landmarks on the frame
+                annotated_frame = frame.copy()
+                if results.pose_landmarks:
+                    mp_drawing.draw_landmarks(
+                        annotated_frame, 
+                        results.pose_landmarks, 
+                        mp_holistic.POSE_CONNECTIONS,
+                        mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
+                        mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2)
+                    )
+                
+                # Save the annotated frame
+                with camera_lock:
+                    global_frame_with_landmarks = annotated_frame
+            else:
+                print("Warning: Could not read frame from webcam.")
+                time.sleep(0.1)  # Small delay to prevent CPU overload
             
     # Release the webcam when the thread is stopping
     cap.release()
@@ -203,7 +228,8 @@ class PostureTestApp:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT,
                 timestamp TEXT,
-                status TEXT
+                status TEXT,
+                duration REAL DEFAULT 0.0
             )
         ''')
         self.conn.commit()
@@ -260,6 +286,19 @@ class PostureTestApp:
         self.status_label = tk.Label(main_frame, text="Status: Initializing...", font=("Arial", 40))
         self.status_label.pack(pady=20)
         
+        # Time tracking labels
+        time_frame = tk.Frame(main_frame)
+        time_frame.pack(fill=tk.X, pady=10)
+        
+        self.good_time_label = tk.Label(time_frame, text="Good Posture Time: 0s", font=("Arial", 14))
+        self.good_time_label.pack(side=tk.LEFT, padx=10)
+        
+        self.slouch_time_label = tk.Label(time_frame, text="Slouch Time: 0s", font=("Arial", 14))
+        self.slouch_time_label.pack(side=tk.LEFT, padx=10)
+        
+        self.ratio_label = tk.Label(time_frame, text="Good Posture Ratio: 0%", font=("Arial", 14))
+        self.ratio_label.pack(side=tk.LEFT, padx=10)
+        
         # Log display
         log_frame = tk.Frame(main_frame)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -294,6 +333,11 @@ class PostureTestApp:
         
         # Initialize internal state variables
         self.last_status = None
+        self.last_status_change_time = time.time()
+        self.good_posture_time = 0.0
+        self.slouch_time = 0.0
+        self.start_time = time.time()
+        
         # Update interval in milliseconds (e.g., 2000ms = 2 seconds)
         self.update_interval = 2000
         
@@ -323,9 +367,10 @@ class PostureTestApp:
         """Update the camera preview if active"""
         if hasattr(self, 'preview_active') and self.preview_active and camera_active:
             with camera_lock:
-                if global_frame is not None:
+                # Use the frame with landmarks instead of the raw frame
+                if global_frame_with_landmarks is not None:
                     # Resize the frame to fit our canvas
-                    preview_frame = cv2.resize(global_frame, (320, 240))
+                    preview_frame = cv2.resize(global_frame_with_landmarks, (320, 240))
                     # Convert to RGB for tkinter
                     preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
                     # Convert to PhotoImage
@@ -342,28 +387,60 @@ class PostureTestApp:
         slouch_detected = get_pose_status()
         current_status = "Slouch Detected" if slouch_detected else "Good Posture"
         
+        # Get current time
+        now = time.time()
+        
+        # Calculate duration since last status change
+        duration = now - self.last_status_change_time
+        
+        # Update timers based on current status
+        if self.last_status is not None:
+            if self.last_status == "Good Posture":
+                self.good_posture_time += duration
+            else:
+                self.slouch_time += duration
+            
+            # Update time labels
+            self.update_time_labels()
+        
         # Only update if the status has changed
         if current_status != self.last_status:
             color = "red" if slouch_detected else "green"
             self.status_label.config(text=f"Status: {current_status}", fg=color)
             self.log_message(f"Status changed to: {current_status}")
             
-            # Record this change with a timestamp
+            # Record this change with a timestamp and duration
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            self.insert_into_db(timestamp, current_status)
+            
+            # Only log if this isn't the first status change
+            if self.last_status is not None:
+                self.insert_into_db(timestamp, self.last_status, duration)
+            
             self.last_status = current_status
+            self.last_status_change_time = now
         
         # Schedule the next update
         self.test_window.after(self.update_interval, self.update_test)
     
-    def insert_into_db(self, timestamp, status):
+    def update_time_labels(self):
+        # Update the time labels with current durations
+        self.good_time_label.config(text=f"Good Posture Time: {self.good_posture_time:.1f}s")
+        self.slouch_time_label.config(text=f"Slouch Time: {self.slouch_time:.1f}s")
+        
+        # Calculate and display ratio
+        total_time = self.good_posture_time + self.slouch_time
+        if total_time > 0:
+            ratio = (self.good_posture_time / total_time) * 100
+            self.ratio_label.config(text=f"Good Posture Ratio: {ratio:.1f}%")
+    
+    def insert_into_db(self, timestamp, status, duration):
         try:
             self.cursor.execute(
-                "INSERT INTO posture_log (username, timestamp, status) VALUES (?, ?, ?)",
-                (self.username, timestamp, status)
+                "INSERT INTO posture_log (username, timestamp, status, duration) VALUES (?, ?, ?, ?)",
+                (self.username, timestamp, status, duration)
             )
             self.conn.commit()
-            self.log_message("Record inserted into database.")
+            self.log_message(f"Record inserted: {status} for {duration:.1f}s")
         except Exception as e:
             self.log_message(f"DB insert error: {e}")
     
@@ -375,25 +452,32 @@ class PostureTestApp:
     def generate_report(self):
         """
         Generate a report that calculates the average "good posture" ratio for each user,
-        then ranks users and shows how much the current user 'beats' themselves.
-        Ranking formula: percentile = ((total_users - rank + 1) / total_users) * 100.
+        based on time spent in each posture state.
         """
         try:
             self.cursor.execute('''
-                SELECT username, AVG(CASE WHEN status = 'Good Posture' THEN 1.0 ELSE 0 END) AS ratio
+                SELECT username,
+                       SUM(CASE WHEN status = 'Good Posture' THEN duration ELSE 0 END) AS good_time,
+                       SUM(duration) AS total_time
                 FROM posture_log
                 GROUP BY username
             ''')
-            user_scores = self.cursor.fetchall()
+            user_data = self.cursor.fetchall()
         except Exception as e:
             self.log_message(f"Error generating report: {e}")
             return
         
-        if not user_scores:
+        if not user_data:
             self.log_message("No data available for report.")
             return
         
-        # Sort users by ratio in descending order (best performer first)
+        # Calculate ratios and sort users by ratio in descending order
+        user_scores = []
+        for user, good_time, total_time in user_data:
+            ratio = (good_time / total_time * 100) if total_time > 0 else 0
+            user_scores.append((user, ratio))
+        
+        # Sort by ratio (best performer first)
         user_scores.sort(key=lambda x: x[1], reverse=True)
         
         # Determine rank for current user (1-indexed)
@@ -412,18 +496,35 @@ class PostureTestApp:
         # Ranking formula: percentile = ((total_users - rank + 1) / total_users) * 100
         percentage_beat = ((total_users - rank + 1) / total_users) * 100
         
+        # Add current session data
+        total_session_time = self.good_posture_time + self.slouch_time
+        session_ratio = (self.good_posture_time / total_session_time * 100) if total_session_time > 0 else 0
+        
         # Display the report in a new window
         report_window = tk.Toplevel(self.test_window)
         report_window.title("Posture Report")
         report_message = (
-            f"User: {self.username}\n"
-            f"Good Posture Ratio: {current_ratio*100:.2f}%\n"
-            f"Your ranking percentile: {percentage_beat:.2f}%\n\n"
+            f"User: {self.username}\n\n"
+            f"Current Session Stats:\n"
+            f"  Good Posture Time: {self.good_posture_time:.1f}s\n"
+            f"  Slouch Time: {self.slouch_time:.1f}s\n"
+            f"  Session Ratio: {session_ratio:.2f}%\n\n"
+            f"Overall Stats:\n"
+            f"  Overall Good Posture Ratio: {current_ratio:.2f}%\n"
+            f"  Your ranking percentile: {percentage_beat:.2f}%\n\n"
             f"(Best performer always gets 100%, and rankings are relative among all users.)"
         )
-        tk.Label(report_window, text=report_message, font=("Arial", 20), justify=tk.LEFT).pack(padx=10, pady=10)
+        tk.Label(report_window, text=report_message, font=("Arial", 14), justify=tk.LEFT).pack(padx=20, pady=20)
     
     def on_closing(self):
+        # Before closing, log the current status with its duration
+        now = time.time()
+        duration = now - self.last_status_change_time
+        
+        if self.last_status is not None:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.insert_into_db(timestamp, self.last_status, duration)
+        
         # Stop the camera thread
         stop_camera()
         
