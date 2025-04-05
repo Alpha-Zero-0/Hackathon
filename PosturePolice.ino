@@ -3,25 +3,20 @@
 // Declare the Servo pin 
 const int servoPin = 3;
 
-// Buzzer pin
-const int buzzerPin = 8; 
-
 // Create a servo object 
 Servo ServoArm; 
 
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(9600);
-  pinMode(buzzerPin,OUTPUT);
+  Serial.begin(115200);
   ServoArm.attach(servoPin);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-    if (Serial.available() > 0)
+    if (Serial.available())
     {
-      String msg = Serial.readString();
-      if (msg == "BP")  //if bad posture
+      if (Serial.readString().equals("BP"))  //if bad posture
       {
         // swing arm around 
         // Make servo go to 0 degrees 
@@ -33,8 +28,11 @@ void loop() {
         // Make servo go to 180 degrees 
         ServoArm.write(180);
       }
-    }
-
+      delay(500);
+    }    
+    
 }
+
+
 
 
