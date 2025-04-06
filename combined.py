@@ -157,9 +157,9 @@ def analyze_posture(frame):
     angleHSE = find_angles(leftHip, leftShoulder, leftEar)
     angleSEV = find_angles(leftShoulder, leftEar, virtualPoint)
 
-    validKHS = (75 <= angleKHS <= 105)
-    validHSE = (angleHSE >= 165)
-    validSEV = (angleSEV >= 165)
+    validKHS = (70 <= angleKHS <= 110)
+    validHSE = (angleHSE >= 160)
+    validSEV = (angleSEV >= 160)
 
     if validKHS and validHSE and validSEV:
         return False  # Good posture
@@ -260,18 +260,18 @@ class PostureTestApp:
         if not entered_username:
             messagebox.showwarning("Missing Username", "Please enter a username.")
             return
-        
-        # (Optional) enforce unique username by checking the database
+
+        # Enforce unique username by checking the database
         self.cursor.execute("SELECT COUNT(*) FROM posture_log WHERE username = ?", (entered_username,))
         count = self.cursor.fetchone()[0]
-        # Uncomment to enforce uniqueness:
-        # if count > 0:
-        #     messagebox.showerror("Username Exists", "This username already exists. Please choose a different username.")
-        #     return
-        
+        if count > 0:
+            messagebox.showerror("Username Exists", "This username already exists. Please choose a different username.")
+            return
+
         self.username = entered_username
         self.root.destroy()
         self.create_test_ui()
+
     
     def create_test_ui(self):
         self.test_window = tk.Tk()
@@ -337,6 +337,7 @@ class PostureTestApp:
             self.preview_active = True
     
     def update_preview(self):
+        self.preview_canvas.delete("all")
         if hasattr(self, 'preview_active') and self.preview_active and camera_active:
             with camera_lock:
                 if global_frame_with_landmarks is not None:
@@ -352,14 +353,16 @@ class PostureTestApp:
         current_status = "Slouch Detected" if slouch_detected else "Good Posture"
         now = time.time()
         duration = now - self.last_status_change_time
-        
+
+        # Update timers based on previous status
         if self.last_status is not None:
             if self.last_status == "Good Posture":
                 self.good_posture_time += duration
             else:
                 self.slouch_time += duration
             self.update_time_labels()
-        
+
+        # If status changed, update UI, log, and record in DB.
         if current_status != self.last_status:
             color = "red" if slouch_detected else "green"
             self.status_label.config(text=f"Status: {current_status}", fg=color)
@@ -369,11 +372,15 @@ class PostureTestApp:
                 self.insert_into_db(timestamp, self.last_status, duration)
             self.last_status = current_status
             self.last_status_change_time = now
-            
-            # Send serial command to Arduino
             self.send_serial_command(current_status)
-        
+        else:
+            # If status hasn't changed but remains 'Slouch Detected',
+            # continue sending the BP command to the Arduino.
+            if current_status == "Slouch Detected":
+                self.send_serial_command(current_status)
+
         self.test_window.after(self.update_interval, self.update_test)
+
     
     def update_time_labels(self):
         self.good_time_label.config(text=f"Good Posture Time: {self.good_posture_time:.1f}s")
