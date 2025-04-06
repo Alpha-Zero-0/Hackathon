@@ -21,17 +21,27 @@
    // put your main code here, to run repeatedly:
      if (Serial.available() > 0)
      {
-       String msg = Serial.readStringUntil('/n');
+       String msg = Serial.readStringUntil('\n');
        msg.trim();
-       if (msg.equals("BP"))  //if bad posture
+       if (msg=="BP")  //if bad posture
        {
          // swing arm around 
-         // Make servo go to 0 degrees 
-         ServoArm.write(0); 
+         // Make servo go to 40 degrees 
+         ServoArm.write(40); 
          delay(1000); 
          // Make servo go to 90 degrees 
          ServoArm.write(90); 
          delay(1000); 
+       }
+       else if (msg=="GP")
+       {
+        ServoArm.write(90);
+        delay(1000);
+       }
+       else
+       {
+        ServoArm.write(90);
+        delay(1000);
        }
      }
  
